@@ -1,5 +1,3 @@
-version: '3.8'
-
 volumes:
   jackery-data:
 
@@ -33,8 +31,20 @@ services:
     build: .
     container_name: jackery-bridge
     restart: always
-    env_file:
-      - .env
+    environment:
+      - JACKERY_USERNAME
+      - JACKERY_PASSWORD
+      - JACKERY_DEVICE_ID
+      - MQTT_BROKER
+      - MQTT_PORT
+      - MQTT_USERNAME
+      - MQTT_PASSWORD
+      - MQTT_DISCOVERY_PREFIX
+      - TELEGRAM_BOT_TOKEN
+      - TELEGRAM_CHAT_ID
+      - POLL_INTERVAL_SEC
+      - LOW_BATTERY_THRESHOLD
+      - CRITICAL_BATTERY_THRESHOLD
     volumes:
       # Persists token cache to prevent session dropouts during container updates
       - jackery-data:/app/data
