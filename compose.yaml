@@ -29,7 +29,7 @@ services:
 
   jackery-bridge:
     build: .
-    image: jackery-bridge:v1.0.0
+    image: jackery-bridge:v1.0.1
     container_name: jackery-bridge
     restart: always
     dns:
