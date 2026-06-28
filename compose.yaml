@@ -2,34 +2,9 @@ volumes:
   jackery-data:
 
 services:
-  homeassistant:
-    image: lscr.io/linuxserver/homeassistant:latest
-    container_name: homeassistant
-    network_mode: host
-    environment:
-      - PUID=568
-      - PGID=568
-      - TZ=America/Los_Angeles
-    volumes:
-      - /mnt/FastPool/Apps/HomeAssistant:/config
-    restart: unless-stopped
-
-  mqtt:
-    image: eclipse-mosquitto:latest
-    container_name: mosquitto
-    ports:
-      - "1883:1883"
-      - "9001:9001"
-    volumes:
-      - ./mosquitto/config:/mosquitto/config
-      - ./mosquitto/data:/mosquitto/data
-      - ./mosquitto/log:/mosquitto/log
-    restart: always
-    user: "568:568"
-
   jackery-bridge:
     build: .
-    image: jackery-bridge:v1.0.1
+    image: jackery-bridge:v1.0.2
     container_name: jackery-bridge
     restart: always
     dns:
@@ -53,8 +28,6 @@ services:
     volumes:
       # Persists token cache to prevent session dropouts during container updates
       - jackery-data:/app/data
-    depends_on:
-      - mqtt
     logging:
       driver: "json-file"
       options:
