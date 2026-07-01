@@ -25,7 +25,7 @@ This repository provides a containerized Python service designed to connect dire
 ├── .env.example              # Template config variables
 ├── .gitignore                # Prevents committing secrets (.env, token caches)
 ├── Dockerfile                # Lightweight multi-stage build running security validation
-├── docker-compose.yml        # Orchestration with restart policy and data persistence
+├── compose.yaml              # Orchestration with restart policy and data persistence
 ├── requirements.txt          # Python dependency pin list
 ├── jackery_api.py            # Login API client with encryption and token caching
 ├── verify_no_secrets.py      # Secrets sniffer script
