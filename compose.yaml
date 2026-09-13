@@ -4,13 +4,9 @@ volumes:
 services:
   jackery-bridge:
     build: .
-    image: jackery-bridge:v1.0.7
+    image: jackery-bridge:v1.0.8
     container_name: jackery-bridge
     restart: always
-    dns:
-      - 192.168.86.22 # Local Pi-hole
-      - 1.1.1.1       # Cloudflare
-      - 1.0.0.1       # Cloudflare Fallback
     environment:
       - JACKERY_USERNAME
       - JACKERY_PASSWORD

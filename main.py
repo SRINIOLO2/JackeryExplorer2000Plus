@@ -10,6 +10,8 @@ import logging
 import threading
 from typing import Dict, Any, Optional, List
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
 
@@ -51,6 +53,22 @@ monitored_devices: List[Dict[str, Any]] = []
 device_states: Dict[str, Dict[str, Any]] = {}  # device_id -> properties
 alert_states: Dict[str, Dict[str, bool]] = {}   # device_id -> alert_name -> triggered
 
+def create_telegram_session() -> requests.Session:
+    s = requests.Session()
+    retries = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retries)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    s.headers.update({"User-Agent": "JackeryBridge/1.0", "Connection": "close"})
+    return s
+
+telegram_session = create_telegram_session()
+
 def send_telegram_message(text: str, reply_markup: Optional[Dict[str, Any]] = None) -> bool:
     """Send a telegram message using the Bot API."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -67,12 +85,12 @@ def send_telegram_message(text: str, reply_markup: Optional[Dict[str, Any]] = No
         payload["reply_markup"] = reply_markup
 
     try:
-        res = requests.post(url, json=payload, timeout=10)
+        res = telegram_session.post(url, json=payload, timeout=15)
         if res.status_code != 200:
             _LOGGER.error("Failed to send Telegram message (%s): %s", res.status_code, res.text)
             # Retry without markdown parse_mode in case formatting caused 400
             del payload["parse_mode"]
-            res2 = requests.post(url, json=payload, timeout=10)
+            res2 = telegram_session.post(url, json=payload, timeout=15)
             if res2.status_code == 200:
                 _LOGGER.info("Delivered plain text fallback Telegram message.")
                 return True
@@ -113,7 +131,7 @@ def handle_callback_query(callback_query: Dict[str, Any]):
     # Acknowledge callback immediately to remove loading state in Telegram
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
-        requests.post(url, json={"callback_query_id": query_id}, timeout=5)
+        telegram_session.post(url, json={"callback_query_id": query_id}, timeout=5)
     except Exception as e:
         _LOGGER.warning("Could not answer callback query: %s", e)
 
@@ -259,7 +277,7 @@ def telegram_polling_loop():
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
             params = {"offset": offset, "timeout": 20}
-            res = requests.get(url, params=params, timeout=25)
+            res = telegram_session.get(url, params=params, timeout=25)
             
             if res.status_code == 200:
                 data = res.json()
