@@ -1,5 +1,9 @@
 import os
 import sys
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
 import time
 import json
 import logging

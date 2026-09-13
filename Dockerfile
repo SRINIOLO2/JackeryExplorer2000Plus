@@ -18,5 +18,7 @@ COPY . .
 # Run pre-execution check to ensure no secrets are hardcoded in the built image
 RUN python3 verify_no_secrets.py
 
+ENV PYTHONUNBUFFERED=1
+
 # Run main application
-CMD ["python3", "main.py"]
+CMD ["python3", "-u", "main.py"]
