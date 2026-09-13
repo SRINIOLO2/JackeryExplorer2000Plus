@@ -4,7 +4,7 @@ import time
 import json
 import logging
 import threading
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import requests
 from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
