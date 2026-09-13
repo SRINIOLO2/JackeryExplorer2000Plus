@@ -68,7 +68,16 @@ def send_telegram_message(text: str, reply_markup: Optional[Dict[str, Any]] = No
 
     try:
         res = requests.post(url, json=payload, timeout=10)
-        return res.status_code == 200
+        if res.status_code != 200:
+            _LOGGER.error("Failed to send Telegram message (%s): %s", res.status_code, res.text)
+            # Retry without markdown parse_mode in case formatting caused 400
+            del payload["parse_mode"]
+            res2 = requests.post(url, json=payload, timeout=10)
+            if res2.status_code == 200:
+                _LOGGER.info("Delivered plain text fallback Telegram message.")
+                return True
+            return False
+        return True
     except Exception as e:
         _LOGGER.error("Failed to send Telegram message: %s", e)
         return False
@@ -386,11 +395,12 @@ def evaluate_alerts(device_id: str, states: Dict[str, Any]):
         if temp <= 40:
             alerts["temp"] = False
 
-def poll_device(device_id: str, manual_refresh: bool = False):
+def poll_device(device_id: Any, manual_refresh: bool = False):
     """Query Jackery API for specific device telemetry, process it, and publish."""
     if not api_client:
         return
 
+    device_id = str(device_id)
     _LOGGER.info("Polling Jackery device: %s (manual_refresh=%s)", device_id, manual_refresh)
     try:
         detail = api_client.get_device_detail(device_id)
@@ -398,7 +408,7 @@ def poll_device(device_id: str, manual_refresh: bool = False):
         properties = data.get("properties", {})
         
         if not properties:
-            _LOGGER.warning("No properties returned for device %s", device_id)
+            _LOGGER.warning("No properties returned for device %s (detail: %s)", device_id, detail)
             return
 
         # Extract values
@@ -456,6 +466,18 @@ def poll_device(device_id: str, manual_refresh: bool = False):
         # Update in-memory state
         device_states[device_id] = state_payload
 
+        _LOGGER.info(
+            "Telemetry for device %s: SoC=%s%%, PV=%sW, AC_in=%sW, Total_out=%sW, Temp=%s°C, AC_out=%s, DC_out=%s",
+            device_id,
+            rb,
+            solar_input,
+            ac_input,
+            op,
+            bt,
+            "ON" if properties.get("oac") == 1 else "OFF",
+            "ON" if properties.get("odc") == 1 else "OFF",
+        )
+
         # Publish state to MQTT
         if mqtt_client:
             state_topic = f"jackery/sensor/jackery_{device_id}/state"
@@ -472,7 +494,7 @@ def poll_device(device_id: str, manual_refresh: bool = False):
             send_telegram_message(status_text, reply_markup=keyboard)
 
     except Exception as e:
-        _LOGGER.error("Failed to query or process device states: %s", e)
+        _LOGGER.error("Failed to query or process device states for %s: %s", device_id, e)
         if manual_refresh:
             send_telegram_message(f"❌ Failed to refresh device status: `{e}`")
 
@@ -568,7 +590,7 @@ def main_loop():
 
     # Register autodiscovery configs
     for d in monitored_devices:
-        dev_id = d.get("devId") or d.get("devSn")
+        dev_id = str(d.get("devId") or d.get("devSn"))
         dev_name = d.get("devName", f"Jackery Explorer {dev_id}")
         prod_type = d.get("productType", "Explorer 2000 Plus")
         setup_mqtt_discovery(dev_id, dev_name, prod_type)
@@ -578,18 +600,25 @@ def main_loop():
     device_summary = ", ".join([d.get("devName", str(d.get("devId") or d.get("devSn"))) for d in monitored_devices])
     send_telegram_message(f"✅ *Jackery Battery Connected!*\n\nDiscovered: *{device_summary}*\nStarting telemetry monitoring...")
 
-    # Initial poll
+    # Initial poll and send status card
     for d in monitored_devices:
-        dev_id = d.get("devId") or d.get("devSn")
+        dev_id = str(d.get("devId") or d.get("devSn"))
         if dev_id:
             poll_device(dev_id)
+            if dev_id in device_states:
+                status_text = (
+                    f"🔋 *Live Battery Status:*\n\n"
+                    + format_status_message(dev_id, device_states[dev_id])
+                )
+                keyboard = make_control_keyboard(dev_id)
+                send_telegram_message(status_text, reply_markup=keyboard)
 
     # Main Polling loop
     _LOGGER.info("Entering main poll loop. Interval: %d seconds.", POLL_INTERVAL_SEC)
     while running:
         try:
             for d in monitored_devices:
-                dev_id = d.get("devId") or d.get("devSn")
+                dev_id = str(d.get("devId") or d.get("devSn"))
                 if dev_id:
                     poll_device(dev_id)
         except Exception as e:

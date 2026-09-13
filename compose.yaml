@@ -4,7 +4,7 @@ volumes:
 services:
   jackery-bridge:
     build: .
-    image: jackery-bridge:v1.0.6
+    image: jackery-bridge:v1.0.7
     container_name: jackery-bridge
     restart: always
     dns:
