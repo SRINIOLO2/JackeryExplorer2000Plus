@@ -9,6 +9,7 @@ import json
 import logging
 import threading
 from typing import Dict, Any, Optional, List
+from datetime import datetime, timezone
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -53,21 +54,21 @@ monitored_devices: List[Dict[str, Any]] = []
 device_states: Dict[str, Dict[str, Any]] = {}  # device_id -> properties
 alert_states: Dict[str, Dict[str, bool]] = {}   # device_id -> alert_name -> triggered
 
-def create_telegram_session() -> requests.Session:
+def create_telegram_api_session() -> requests.Session:
     s = requests.Session()
     retries = Retry(
         total=3,
-        backoff_factor=1,
+        backoff_factor=0.5,
         status_forcelist=[429, 500, 502, 503, 504],
         raise_on_status=False,
     )
     adapter = HTTPAdapter(max_retries=retries)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
-    s.headers.update({"User-Agent": "JackeryBridge/1.0", "Connection": "close"})
+    s.headers.update({"User-Agent": "JackeryBridge-API/1.0"})
     return s
 
-telegram_session = create_telegram_session()
+telegram_api_session = create_telegram_api_session()
 
 def send_telegram_message(text: str, reply_markup: Optional[Dict[str, Any]] = None) -> bool:
     """Send a telegram message using the Bot API."""
@@ -85,12 +86,12 @@ def send_telegram_message(text: str, reply_markup: Optional[Dict[str, Any]] = No
         payload["reply_markup"] = reply_markup
 
     try:
-        res = telegram_session.post(url, json=payload, timeout=15)
+        res = telegram_api_session.post(url, json=payload, timeout=10)
         if res.status_code != 200:
             _LOGGER.error("Failed to send Telegram message (%s): %s", res.status_code, res.text)
             # Retry without markdown parse_mode in case formatting caused 400
             del payload["parse_mode"]
-            res2 = telegram_session.post(url, json=payload, timeout=15)
+            res2 = telegram_api_session.post(url, json=payload, timeout=10)
             if res2.status_code == 200:
                 _LOGGER.info("Delivered plain text fallback Telegram message.")
                 return True
@@ -100,42 +101,120 @@ def send_telegram_message(text: str, reply_markup: Optional[Dict[str, Any]] = No
         _LOGGER.error("Failed to send Telegram message: %s", e)
         return False
 
+def edit_telegram_message(chat_id: Any, message_id: int, text: str, reply_markup: Optional[Dict[str, Any]] = None) -> bool:
+    """Edit an existing Telegram message in-place."""
+    if not TELEGRAM_BOT_TOKEN:
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    try:
+        res = telegram_api_session.post(url, json=payload, timeout=10)
+        if res.status_code == 200:
+            _LOGGER.info("Successfully updated Telegram status card (message_id=%s)", message_id)
+            return True
+        elif "message is not modified" in res.text:
+            _LOGGER.info("Telegram message %s is already up to date.", message_id)
+            return True
+        else:
+            del payload["parse_mode"]
+            res2 = telegram_api_session.post(url, json=payload, timeout=10)
+            if res2.status_code == 200 or "message is not modified" in res2.text:
+                return True
+            _LOGGER.warning("Failed to edit Telegram message (%s): %s", res.status_code, res.text)
+            return False
+    except Exception as e:
+        _LOGGER.warning("Error editing Telegram message %s: %s", message_id, e)
+        return False
+
+def answer_callback_query(query_id: str, text: str = "", show_alert: bool = False) -> bool:
+    """Acknowledge a Telegram button click and optionally display a toast notification or modal alert."""
+    if not TELEGRAM_BOT_TOKEN or not query_id:
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+    payload = {
+        "callback_query_id": query_id,
+        "text": text,
+        "show_alert": show_alert
+    }
+    try:
+        res = telegram_api_session.post(url, json=payload, timeout=5)
+        return res.status_code == 200
+    except Exception as e:
+        _LOGGER.warning("Could not answer callback query %s: %s", query_id, e)
+        return False
+
 def make_control_keyboard(device_id: str) -> Dict[str, Any]:
     """Generate the inline keyboard with toggle buttons."""
-    # Find current states to label buttons clearly
+    device_id = str(device_id)
     states = device_states.get(device_id, {})
     ac_label = "🔴 Turn AC OFF" if states.get("oac") == 1 else "🟢 Turn AC ON"
     dc_label = "🔴 Turn DC OFF" if states.get("odc") == 1 else "🟢 Turn DC ON"
     
-    return {
-        "inline_keyboard": [
-            [
-                {"text": ac_label, "callback_data": f"toggle_ac_{device_id}"},
-                {"text": dc_label, "callback_data": f"toggle_dc_{device_id}"}
-            ],
-            [
-                {"text": "🔄 Refresh Status", "callback_data": f"refresh_{device_id}"}
-            ]
-        ]
-    }
+    keyboard = []
+    # If MQTT is connected, expose remote switching buttons
+    if mqtt_client:
+        keyboard.append([
+            {"text": ac_label, "callback_data": f"toggle_ac_{device_id}"},
+            {"text": dc_label, "callback_data": f"toggle_dc_{device_id}"}
+        ])
+    # Always include the instant refresh button
+    keyboard.append([
+        {"text": "🔄 Refresh Status", "callback_data": f"refresh_{device_id}"}
+    ])
+    
+    return {"inline_keyboard": keyboard}
+
+def refresh_and_update_telegram(device_id: str, chat_id: Any, message_id: Optional[int] = None):
+    """Fetch latest telemetry from Jackery API and update status card in Telegram."""
+    device_id = str(device_id)
+    _LOGGER.info("Executing on-demand telemetry refresh for device %s (message_id=%s)", device_id, message_id)
+    try:
+        poll_device(device_id)
+        states = device_states.get(device_id)
+        if not states:
+            _LOGGER.warning("No state available after poll for %s", device_id)
+            return
+
+        status_text = (
+            f"🔋 *Live Battery Status:*\n\n"
+            + format_status_message(device_id, states)
+        )
+        keyboard = make_control_keyboard(device_id)
+
+        if message_id:
+            updated = edit_telegram_message(chat_id, message_id, status_text, reply_markup=keyboard)
+            if not updated:
+                _LOGGER.debug("Edit message returned False, sending fresh card as fallback")
+                send_telegram_message(status_text, reply_markup=keyboard)
+        else:
+            send_telegram_message(status_text, reply_markup=keyboard)
+
+    except Exception as e:
+        _LOGGER.error("Error refreshing device status for %s: %s", device_id, e)
 
 def handle_callback_query(callback_query: Dict[str, Any]):
     """Process incoming button clicks from Telegram."""
-    query_id = callback_query["id"]
-    data = callback_query["data"]
+    query_id = callback_query.get("id")
+    data = callback_query.get("data", "")
     message = callback_query.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
+    message_id = message.get("message_id")
+    chat_id = message.get("chat", {}).get("id") or TELEGRAM_CHAT_ID
 
-    _LOGGER.info("Received Telegram button callback: %s", data)
+    _LOGGER.info(
+        "Received Telegram button callback: data='%s', query_id='%s', message_id=%s",
+        data, query_id, message_id
+    )
 
-    # Acknowledge callback immediately to remove loading state in Telegram
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
-        telegram_session.post(url, json={"callback_query_id": query_id}, timeout=5)
-    except Exception as e:
-        _LOGGER.warning("Could not answer callback query: %s", e)
-
-    # Parse action and device id
     action = ""
     device_id = ""
     if data.startswith("toggle_ac_"):
@@ -149,48 +228,67 @@ def handle_callback_query(callback_query: Dict[str, Any]):
         device_id = data.replace("refresh_", "")
 
     if not device_id:
+        if query_id:
+            answer_callback_query(query_id, text="Unknown device action.")
         return
 
     states = device_states.get(device_id, {})
     
     if action == "ac":
-        current_state = states.get("oac", 0)
-        target = "OFF" if current_state == 1 else "ON"
-        topic = f"jackery/{device_id}/command/oac"
-        if mqtt_client:
+        if not mqtt_client:
+            answer_callback_query(
+                query_id,
+                text="⚠️ Remote AC/DC switching requires Home Assistant/MQTT. In standalone cloud mode, Jackery API is read-only telemetry.",
+                show_alert=True
+            )
+        else:
+            answer_callback_query(query_id, text="⚡ Sending AC toggle command...")
+            current_state = states.get("oac", 0)
+            target = "OFF" if current_state == 1 else "ON"
+            topic = f"jackery/{device_id}/command/oac"
             mqtt_client.publish(topic, target, retain=False)
             reply = f"✉️ Published command `{target}` to MQTT topic `{topic}`. (AC output toggle requested)"
-        else:
-            reply = "❌ MQTT broker disconnected! Cannot send command."
-        send_telegram_message(reply)
+            send_telegram_message(reply)
         
     elif action == "dc":
-        current_state = states.get("odc", 0)
-        target = "OFF" if current_state == 1 else "ON"
-        topic = f"jackery/{device_id}/command/odc"
-        if mqtt_client:
+        if not mqtt_client:
+            answer_callback_query(
+                query_id,
+                text="⚠️ Remote AC/DC switching requires Home Assistant/MQTT. In standalone cloud mode, Jackery API is read-only telemetry.",
+                show_alert=True
+            )
+        else:
+            answer_callback_query(query_id, text="⚡ Sending DC toggle command...")
+            current_state = states.get("odc", 0)
+            target = "OFF" if current_state == 1 else "ON"
+            topic = f"jackery/{device_id}/command/odc"
             mqtt_client.publish(topic, target, retain=False)
             reply = f"✉️ Published command `{target}` to MQTT topic `{topic}`. (DC output toggle requested)"
-        else:
-            reply = "❌ MQTT broker disconnected! Cannot send command."
-        send_telegram_message(reply)
+            send_telegram_message(reply)
         
     elif action == "refresh":
-        _LOGGER.info("Manual refresh triggered by bot user")
-        # Trigger immediate API fetch asynchronously
-        threading.Thread(target=poll_device, args=(device_id, True)).start()
+        # Immediate toast in Telegram UI
+        answer_callback_query(query_id, text="🔄 Fetching latest Jackery telemetry...")
+        threading.Thread(
+            target=refresh_and_update_telegram,
+            args=(device_id, chat_id, message_id)
+        ).start()
 
 def handle_telegram_message(message: Dict[str, Any]):
     """Process incoming text messages to the Telegram Bot."""
     text = message.get("text", "").strip()
-    chat_id = message.get("chat", {}).get("id")
+    chat_id = message.get("chat", {}).get("id") or TELEGRAM_CHAT_ID
 
-    if text == "/start" or text == "/help":
+    _LOGGER.info("Received Telegram text message from %s: '%s'", chat_id, text)
+
+    if text in ("/start", "/help"):
         help_text = (
             "🤖 *Jackery Telegram Bridge Bot*\n\n"
             "Commands:\n"
-            "/status \\- View current state & access toggle controls\n"
-            "/refresh \\- Trigger an immediate query of the API"
+            "• `/status` - View current state & interactive card\n"
+            "• `/refresh` - Force an immediate Jackery cloud telemetry pull\n"
+            "• `/help` - Show this guidance message\n\n"
+            "The bridge automatically polls Jackery every 60 seconds and sends low-battery alerts below 20% and 5%."
         )
         send_telegram_message(help_text)
         
@@ -208,7 +306,10 @@ def handle_telegram_message(message: Dict[str, Any]):
             return
             
         for dev_id, states in device_states.items():
-            status_text = format_status_message(dev_id, states)
+            status_text = (
+                f"🔋 *Live Battery Status:*\n\n"
+                + format_status_message(dev_id, states)
+            )
             keyboard = make_control_keyboard(dev_id)
             send_telegram_message(status_text, reply_markup=keyboard)
             
@@ -216,11 +317,14 @@ def handle_telegram_message(message: Dict[str, Any]):
         if not monitored_devices:
             send_telegram_message(f"⚠️ No devices bound to account `{JACKERY_USERNAME}` yet.")
             return
-        send_telegram_message("🔄 Telemetry refresh requested. Fetching...")
+        send_telegram_message("🔄 Telemetry refresh requested. Fetching from Jackery cloud...")
         for d in monitored_devices:
-            dev_id = d.get("devId") or d.get("devSn")
+            dev_id = str(d.get("devId") or d.get("devSn"))
             if dev_id:
-                threading.Thread(target=poll_device, args=(dev_id, True)).start()
+                threading.Thread(
+                    target=refresh_and_update_telegram,
+                    args=(dev_id, chat_id, None)
+                ).start()
 
 def format_status_message(device_id: str, states: Dict[str, Any]) -> str:
     """Format status values into a user-friendly Telegram markdown message."""
@@ -250,6 +354,7 @@ def format_status_message(device_id: str, states: Dict[str, Any]) -> str:
     # settings
     eco_mode = "ON 🟢" if states.get("pm") == 1 else "OFF 🔴"
     charge_speed = states.get("cs", "Unknown")
+    now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
     
     return (
         f"🔋 *Jackery Status* (ID: `{device_id}`)\n"
@@ -262,13 +367,18 @@ def format_status_message(device_id: str, states: Dict[str, Any]) -> str:
         f"  - Solar Harvest: `{solar_input} W`\n"
         f"• *Eco-mode (PM)*: {eco_mode}\n"
         f"• *Charging speed*: `{charge_speed}`\n"
-        f"━━━━━━━━━━━━━━━━━━━"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"⏱ *Updated*: `{now_str}`"
     )
 
 def telegram_polling_loop():
-    """Loop to poll Telegram Bot API for messages & button callbacks."""
+    """Loop to poll Telegram Bot API for messages & button callbacks using dedicated Keep-Alive session."""
     _LOGGER.info("Starting Telegram Bot listener thread...")
     offset = 0
+
+    poll_session = requests.Session()
+    poll_session.headers.update({"User-Agent": "JackeryBridge-Poller/1.0"})
+
     while running:
         if not TELEGRAM_BOT_TOKEN:
             time.sleep(5)
@@ -276,8 +386,8 @@ def telegram_polling_loop():
             
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-            params = {"offset": offset, "timeout": 20}
-            res = telegram_session.get(url, params=params, timeout=25)
+            params = {"offset": offset, "timeout": 15}
+            res = poll_session.get(url, params=params, timeout=25)
             
             if res.status_code == 200:
                 data = res.json()
@@ -289,9 +399,22 @@ def telegram_polling_loop():
                             handle_callback_query(update["callback_query"])
                         elif "message" in update:
                             handle_telegram_message(update["message"])
+            elif res.status_code == 409:
+                _LOGGER.warning("Telegram getUpdates conflict (409). Another poller instance may be running. Waiting 5s...")
+                time.sleep(5)
+            else:
+                _LOGGER.warning("Telegram getUpdates returned status %d: %s", res.status_code, res.text)
+                time.sleep(2)
                             
+        except requests.exceptions.Timeout:
+            # Normal long poll timeout when no updates occurred; continue immediately
+            continue
+        except requests.exceptions.RequestException as e:
+            _LOGGER.debug("Telegram polling transient network error: %s", e)
+            time.sleep(1)
         except Exception as e:
-            _LOGGER.debug("Telegram polling exception: %s", e)
+            _LOGGER.error("Unexpected error in telegram_polling_loop: %s", e)
+            time.sleep(2)
             
         time.sleep(1)
 
@@ -413,13 +536,13 @@ def evaluate_alerts(device_id: str, states: Dict[str, Any]):
         if temp <= 40:
             alerts["temp"] = False
 
-def poll_device(device_id: Any, manual_refresh: bool = False):
+def poll_device(device_id: Any):
     """Query Jackery API for specific device telemetry, process it, and publish."""
     if not api_client:
         return
 
     device_id = str(device_id)
-    _LOGGER.info("Polling Jackery device: %s (manual_refresh=%s)", device_id, manual_refresh)
+    _LOGGER.info("Polling Jackery device: %s", device_id)
     try:
         detail = api_client.get_device_detail(device_id)
         data = detail.get("data", {})
@@ -505,16 +628,8 @@ def poll_device(device_id: Any, manual_refresh: bool = False):
         # Evaluate alerts
         evaluate_alerts(device_id, state_payload)
         
-        # If manual refresh from Telegram, send confirmation status
-        if manual_refresh:
-            status_text = "🔄 *Status Refreshed:*\n\n" + format_status_message(device_id, state_payload)
-            keyboard = make_control_keyboard(device_id)
-            send_telegram_message(status_text, reply_markup=keyboard)
-
     except Exception as e:
         _LOGGER.error("Failed to query or process device states for %s: %s", device_id, e)
-        if manual_refresh:
-            send_telegram_message(f"❌ Failed to refresh device status: `{e}`")
 
 def main_loop():
     """Main program execution loop."""
