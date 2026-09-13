@@ -171,12 +171,17 @@ class JackeryAPI:
             response.raise_for_status()
             data = response.json()
 
-            # Check for expired token (code=10402)
-            if data.get("code") == 10402:
-                _LOGGER.info("Token expired. Re-logging in...")
+            # Check for expired or superseded token (10402: expired, 10403: logged in elsewhere)
+            if data.get("code") in (10402, 10403):
+                _LOGGER.info(
+                    "Token expired or session superseded (code %s: %s). Re-logging in...",
+                    data.get("code"),
+                    data.get("msg"),
+                )
+                self._token = None
                 if not self.login():
                     raise JackeryAuthenticationError(
-                        "Failed to re-login after token expired."
+                        "Failed to re-login after token expired/superseded."
                     )
                 # Retry the request with the new token
                 headers["token"] = self._token
