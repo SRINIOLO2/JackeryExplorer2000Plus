@@ -43,6 +43,7 @@ CRITICAL_BATTERY_THRESHOLD = int(os.getenv("CRITICAL_BATTERY_THRESHOLD", 5))
 running = True
 api_client: Optional[JackeryAPI] = None
 mqtt_client: Optional[mqtt.Client] = None
+monitored_devices: List[Dict[str, Any]] = []
 device_states: Dict[str, Dict[str, Any]] = {}  # device_id -> properties
 alert_states: Dict[str, Dict[str, bool]] = {}   # device_id -> alert_name -> triggered
 
@@ -157,14 +158,22 @@ def handle_telegram_message(message: Dict[str, Any]):
         help_text = (
             "🤖 *Jackery Telegram Bridge Bot*\n\n"
             "Commands:\n"
-            "/status \- View current state & access toggle controls\n"
-            "/refresh \- Trigger an immediate query of the API"
+            "/status \\- View current state & access toggle controls\n"
+            "/refresh \\- Trigger an immediate query of the API"
         )
         send_telegram_message(help_text)
         
     elif text == "/status":
         if not device_states:
-            send_telegram_message("❌ No device telemetry collected yet. Please wait...")
+            if not monitored_devices:
+                send_telegram_message(
+                    f"⚠️ *Jackery Bridge Online*\n\n"
+                    f"• Account: `{JACKERY_USERNAME}`\n"
+                    f"• Status: Authenticated to Jackery Cloud, waiting for battery to appear in account.\n\n"
+                    f"👉 Please ensure your Explorer 2000 Plus is bound or shared in the Jackery app. Telemetry will appear automatically once detected."
+                )
+            else:
+                send_telegram_message("⏳ Device detected! Collecting first telemetry reading. Please wait...")
             return
             
         for dev_id, states in device_states.items():
@@ -173,12 +182,14 @@ def handle_telegram_message(message: Dict[str, Any]):
             send_telegram_message(status_text, reply_markup=keyboard)
             
     elif text == "/refresh":
-        if not device_states:
-            send_telegram_message("❌ No devices registered to refresh.")
+        if not monitored_devices:
+            send_telegram_message(f"⚠️ No devices bound to account `{JACKERY_USERNAME}` yet.")
             return
         send_telegram_message("🔄 Telemetry refresh requested. Fetching...")
-        for dev_id in device_states.keys():
-            threading.Thread(target=poll_device, args=(dev_id, True)).start()
+        for d in monitored_devices:
+            dev_id = d.get("devId") or d.get("devSn")
+            if dev_id:
+                threading.Thread(target=poll_device, args=(dev_id, True)).start()
 
 def format_status_message(device_id: str, states: Dict[str, Any]) -> str:
     """Format status values into a user-friendly Telegram markdown message."""
@@ -497,55 +508,86 @@ def main_loop():
     else:
         _LOGGER.warning("MQTT_BROKER not set in environment. Continuing in Telegram-only mode.")
 
-    # 3. Discover devices and register topics
-    devices = []
-    try:
-        res = api_client.get_device_list()
-        devices = res.get("data", [])
-    except Exception as e:
-        _LOGGER.error("Failed to retrieve device list during startup: %s", e)
-        sys.exit(1)
+    # Start Telegram Listener thread early so user can interact with the bot immediately
+    telegram_thread = threading.Thread(target=telegram_polling_loop)
+    telegram_thread.daemon = True
+    telegram_thread.start()
 
-    if not devices:
-        _LOGGER.error("No devices found bound to this Jackery account!")
-        sys.exit(1)
+    # 3. Discover devices and register topics (with retry loop to prevent crashlooping)
+    global monitored_devices
+    notified_waiting = False
 
-    # Filter by user configuration
-    monitored_devices = []
-    for d in devices:
-        dev_id = d.get("devId")
-        if JACKERY_DEVICE_ID and dev_id != JACKERY_DEVICE_ID:
-            continue
-        monitored_devices.append(d)
+    while running and not monitored_devices:
+        try:
+            res = api_client.get_device_list()
+            _LOGGER.info("Jackery get_device_list response: %s", res)
+            raw_devices = res.get("data", [])
+            devices = []
+            if isinstance(raw_devices, list):
+                devices = raw_devices
+            elif isinstance(raw_devices, dict):
+                devices = raw_devices.get("list", [raw_devices])
 
-    if not monitored_devices:
-        _LOGGER.error("Monitored device list is empty! (Checked configured JACKERY_DEVICE_ID: %s)", JACKERY_DEVICE_ID)
-        sys.exit(1)
+            for d in devices:
+                dev_id = d.get("devId") or d.get("devSn")
+                if JACKERY_DEVICE_ID and dev_id != JACKERY_DEVICE_ID:
+                    continue
+                if d not in monitored_devices:
+                    monitored_devices.append(d)
+        except Exception as e:
+            _LOGGER.error("Failed to retrieve device list: %s", e)
+
+        if not monitored_devices:
+            if not notified_waiting:
+                msg = (
+                    f"⚠️ *Jackery Bridge Connected to Cloud*\n\n"
+                    f"• Account: `{JACKERY_USERNAME}`\n"
+                    f"• Status: Authenticated successfully, but 0 batteries were found bound to this account.\n\n"
+                    f"👉 If this is a secondary account, please ensure your Explorer 2000 Plus "
+                    f"is shared or bound in the Jackery mobile app.\n\n"
+                    f"The bridge is listening and will connect automatically as soon as it appears."
+                )
+                send_telegram_message(msg)
+                notified_waiting = True
+
+            _LOGGER.warning(
+                "No devices found bound to Jackery account '%s'. Waiting 30s before retrying...",
+                JACKERY_USERNAME
+            )
+            for _ in range(30):
+                if not running:
+                    break
+                time.sleep(1)
+
+    if not running:
+        return
 
     # Register autodiscovery configs
     for d in monitored_devices:
-        dev_id = d.get("devId")
+        dev_id = d.get("devId") or d.get("devSn")
         dev_name = d.get("devName", f"Jackery Explorer {dev_id}")
         prod_type = d.get("productType", "Explorer 2000 Plus")
         setup_mqtt_discovery(dev_id, dev_name, prod_type)
         # Prepopulate state dict
         device_states[dev_id] = {}
 
-    # Start Telegram Listener thread
-    telegram_thread = threading.Thread(target=telegram_polling_loop)
-    telegram_thread.daemon = True
-    telegram_thread.start()
+    device_summary = ", ".join([d.get("devName", str(d.get("devId") or d.get("devSn"))) for d in monitored_devices])
+    send_telegram_message(f"✅ *Jackery Battery Connected!*\n\nDiscovered: *{device_summary}*\nStarting telemetry monitoring...")
 
     # Initial poll
     for d in monitored_devices:
-        poll_device(d["devId"])
+        dev_id = d.get("devId") or d.get("devSn")
+        if dev_id:
+            poll_device(dev_id)
 
     # Main Polling loop
     _LOGGER.info("Entering main poll loop. Interval: %d seconds.", POLL_INTERVAL_SEC)
     while running:
         try:
             for d in monitored_devices:
-                poll_device(d["devId"])
+                dev_id = d.get("devId") or d.get("devSn")
+                if dev_id:
+                    poll_device(dev_id)
         except Exception as e:
             _LOGGER.error("Error in main poll iteration: %s", e)
             
