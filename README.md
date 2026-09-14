@@ -97,12 +97,22 @@ Once the container runs and connects to the MQTT broker:
 
 ---
 
+## 🏗️ Architecture
+
+The bridge is powered by Python and runs fully asynchronously using `asyncio` and `aiohttp`.
+
+The core Jackery communication is handled by the **[socketry](https://pypi.org/project/socketry/)** library. 
+Unlike the standard HTTP read-only endpoints, `socketry` connects directly to Jackery's proprietary MQTT control plane. This enables the bridge to not only read telemetry instantly but also send real-time control commands (AC/DC toggle, Charge Speed, Eco Mode, Battery Protection) directly to the battery from Telegram, completely bypassing the need for a full Home Assistant installation.
+
+---
+
 ## 🙏 Attributions & Acknowledgments
 
 This project builds upon the foundational reverse-engineering research and open-source contributions of the community:
 
-*   **API Reverse Engineering Research**: Special thanks to **[Hsky16](https://qiita.com/Hsky16)** for the original discovery and documentation of the Jackery cloud authentication protocol, RSA/AES payload encryption, and API endpoints detailed in [Qiita: JackeryのAPIを叩いてみた (Calling the Jackery API)](https://qiita.com/Hsky16/items/c163137265a87186ac39).
-*   **Jackery Home Assistant Component**: Credit to **[@theak](https://github.com/theak)** for the [jackery-homeassistant](https://github.com/theak/jackery-homeassistant) custom component implementation, which served as key inspiration for mapping device properties and cloud polling logic.
+*   **Hsky16**: For their foundational article, [Jackery API reverse engineering (Qiita)](https://qiita.com/Hsky16/items/c163137265a87186ac39), which documented the initial Jackery app AES/RSA payload encryption and login flow.
+*   **@theak**: For pioneering the [jackery-homeassistant](https://github.com/theak/jackery-homeassistant) custom component, which mapped out the raw device telemetry properties (`rb`, `op`, `ip`).
+*   **@usersaynoso**: For authoring the `socketry` library and bringing full device control and MQTT publishing to the open-source Jackery ecosystem.
 
 ---
 
@@ -113,4 +123,3 @@ The architecture, code implementation, GitOps integration, and debugging in this
 *   **AI Pair Programming**: Interactively designed and iterated with the system engineer to decouple dependencies, build a standalone Docker bridge, and support cloud-first Telegram monitoring.
 *   **Automated Diagnostics & Resiliency**: Real-time diagnostic debugging, automated session recovery (`Code 10403: Account logged in elsewhere`), Telegram long-polling socket stability, in-place inline message updates, and local timezone handling were analyzed, patched, and verified end-to-end by Antigravity 2.0.
 *   **Security & Best Practices**: Pre-build secrets scanning (`verify_no_secrets.py`) and GitOps orchestration workflows were architected to adhere to secure software development practices.
-
