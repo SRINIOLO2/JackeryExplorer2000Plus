@@ -469,8 +469,7 @@ async def poll_device(device_id: str):
     _LOGGER.info("Polling Jackery device (Socketry): %s", device_id)
     try:
         dev = jackery_client.device(device_id)
-        res = await dev.get_all_properties()
-        data = res.get("data", {})
+        data = await dev.get_all_properties()
         properties = data.get("properties", {})
         
         if not properties:
