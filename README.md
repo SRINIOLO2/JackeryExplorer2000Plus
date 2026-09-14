@@ -94,3 +94,23 @@ Once the container runs and connects to the MQTT broker:
 3.  All sensors (battery, charging speed, input power, solar harvested, binary switches) are populated.
 4.  You can add these sensors directly to your Lovelace UI cards, gauges, or historical charts.
 5.  **AC/DC switches**: To use the Telegram bot's buttons, write an automation in Home Assistant that triggers when a message is received on `jackery/<device_id>/command/oac` (AC) or `jackery/<device_id>/command/odc` (DC) to toggle your smart plugs or Bluetooth relays.
+
+---
+
+## 🙏 Attributions & Acknowledgments
+
+This project builds upon the foundational reverse-engineering research and open-source contributions of the community:
+
+*   **API Reverse Engineering Research**: Special thanks to **[Hsky16](https://qiita.com/Hsky16)** for the original discovery and documentation of the Jackery cloud authentication protocol, RSA/AES payload encryption, and API endpoints detailed in [Qiita: JackeryのAPIを叩いてみた (Calling the Jackery API)](https://qiita.com/Hsky16/items/c163137265a87186ac39).
+*   **Jackery Home Assistant Component**: Credit to **[@theak](https://github.com/theak)** for the [jackery-homeassistant](https://github.com/theak/jackery-homeassistant) custom component implementation, which served as key inspiration for mapping device properties and cloud polling logic.
+
+---
+
+## 🤖 AI-Driven Development & Antigravity 2.0
+
+The architecture, code implementation, GitOps integration, and debugging in this repository were autonomously developed and pair-programmed using **[Google Antigravity 2.0](https://deepmind.google/)** (an advanced agentic AI coding assistant developed by Google DeepMind):
+
+*   **AI Pair Programming**: Interactively designed and iterated with the system engineer to decouple dependencies, build a standalone Docker bridge, and support cloud-first Telegram monitoring.
+*   **Automated Diagnostics & Resiliency**: Real-time diagnostic debugging, automated session recovery (`Code 10403: Account logged in elsewhere`), Telegram long-polling socket stability, in-place inline message updates, and local timezone handling were analyzed, patched, and verified end-to-end by Antigravity 2.0.
+*   **Security & Best Practices**: Pre-build secrets scanning (`verify_no_secrets.py`) and GitOps orchestration workflows were architected to adhere to secure software development practices.
+
