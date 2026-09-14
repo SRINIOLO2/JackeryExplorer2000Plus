@@ -4,10 +4,12 @@ volumes:
 services:
   jackery-bridge:
     build: .
-    image: jackery-bridge:v1.0.9
+    image: jackery-bridge:v1.0.10
     container_name: jackery-bridge
     restart: always
     environment:
+      - TZ=${TZ:-America/Los_Angeles}
+      - TIMEZONE=${TIMEZONE:-America/Los_Angeles}
       - JACKERY_USERNAME
       - JACKERY_PASSWORD
       - JACKERY_DEVICE_ID

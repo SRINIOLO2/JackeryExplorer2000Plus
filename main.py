@@ -10,6 +10,10 @@ import logging
 import threading
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
+try:
+    import zoneinfo
+except ImportError:
+    from backports import zoneinfo
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -45,6 +49,23 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POLL_INTERVAL_SEC = int(os.getenv("POLL_INTERVAL_SEC", 60))
 LOW_BATTERY_THRESHOLD = int(os.getenv("LOW_BATTERY_THRESHOLD", 20))
 CRITICAL_BATTERY_THRESHOLD = int(os.getenv("CRITICAL_BATTERY_THRESHOLD", 5))
+
+# Timezone Configuration (Defaults to America/Los_Angeles)
+TIMEZONE_NAME = os.getenv("TIMEZONE", os.getenv("TZ", "America/Los_Angeles"))
+try:
+    APP_TZ = zoneinfo.ZoneInfo(TIMEZONE_NAME)
+    _LOGGER.info("Configured application timezone: %s", TIMEZONE_NAME)
+except Exception as e:
+    _LOGGER.warning("Could not load timezone '%s' (%s). Falling back to America/Los_Angeles", TIMEZONE_NAME, e)
+    APP_TZ = zoneinfo.ZoneInfo("America/Los_Angeles")
+
+def get_current_time_str() -> str:
+    """Return current timestamp formatted in local timezone (e.g. '5:26:15 PM PDT')."""
+    now = datetime.now(APP_TZ)
+    formatted = now.strftime("%I:%M:%S %p %Z")
+    if formatted.startswith("0"):
+        formatted = formatted[1:]
+    return formatted
 
 # Global states
 running = True
@@ -85,21 +106,26 @@ def send_telegram_message(text: str, reply_markup: Optional[Dict[str, Any]] = No
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
-    try:
-        res = telegram_api_session.post(url, json=payload, timeout=10)
-        if res.status_code != 200:
-            _LOGGER.error("Failed to send Telegram message (%s): %s", res.status_code, res.text)
-            # Retry without markdown parse_mode in case formatting caused 400
-            del payload["parse_mode"]
-            res2 = telegram_api_session.post(url, json=payload, timeout=10)
-            if res2.status_code == 200:
-                _LOGGER.info("Delivered plain text fallback Telegram message.")
-                return True
+    for attempt in range(2):
+        try:
+            res = telegram_api_session.post(url, json=payload, timeout=10)
+            if res.status_code != 200:
+                _LOGGER.error("Failed to send Telegram message (%s): %s", res.status_code, res.text)
+                if "parse_mode" in payload:
+                    del payload["parse_mode"]
+                    res2 = telegram_api_session.post(url, json=payload, timeout=10)
+                    if res2.status_code == 200:
+                        _LOGGER.info("Delivered plain text fallback Telegram message.")
+                        return True
+                return False
+            return True
+        except Exception as e:
+            if attempt == 0:
+                time.sleep(0.5)
+                continue
+            _LOGGER.error("Failed to send Telegram message: %s", e)
             return False
-        return True
-    except Exception as e:
-        _LOGGER.error("Failed to send Telegram message: %s", e)
-        return False
+    return False
 
 def edit_telegram_message(chat_id: Any, message_id: int, text: str, reply_markup: Optional[Dict[str, Any]] = None) -> bool:
     """Edit an existing Telegram message in-place."""
@@ -116,24 +142,30 @@ def edit_telegram_message(chat_id: Any, message_id: int, text: str, reply_markup
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
-    try:
-        res = telegram_api_session.post(url, json=payload, timeout=10)
-        if res.status_code == 200:
-            _LOGGER.info("Successfully updated Telegram status card (message_id=%s)", message_id)
-            return True
-        elif "message is not modified" in res.text:
-            _LOGGER.info("Telegram message %s is already up to date.", message_id)
-            return True
-        else:
-            del payload["parse_mode"]
-            res2 = telegram_api_session.post(url, json=payload, timeout=10)
-            if res2.status_code == 200 or "message is not modified" in res2.text:
+    for attempt in range(2):
+        try:
+            res = telegram_api_session.post(url, json=payload, timeout=10)
+            if res.status_code == 200:
+                _LOGGER.info("Successfully updated Telegram status card (message_id=%s)", message_id)
                 return True
-            _LOGGER.warning("Failed to edit Telegram message (%s): %s", res.status_code, res.text)
+            elif "message is not modified" in res.text:
+                _LOGGER.info("Telegram message %s is already up to date.", message_id)
+                return True
+            else:
+                if "parse_mode" in payload:
+                    del payload["parse_mode"]
+                    res2 = telegram_api_session.post(url, json=payload, timeout=10)
+                    if res2.status_code == 200 or "message is not modified" in res2.text:
+                        return True
+                _LOGGER.warning("Failed to edit Telegram message (%s): %s", res.status_code, res.text)
+                return False
+        except Exception as e:
+            if attempt == 0:
+                time.sleep(0.5)
+                continue
+            _LOGGER.warning("Error editing Telegram message %s: %s", message_id, e)
             return False
-    except Exception as e:
-        _LOGGER.warning("Error editing Telegram message %s: %s", message_id, e)
-        return False
+    return False
 
 def answer_callback_query(query_id: str, text: str = "", show_alert: bool = False) -> bool:
     """Acknowledge a Telegram button click and optionally display a toast notification or modal alert."""
@@ -354,7 +386,7 @@ def format_status_message(device_id: str, states: Dict[str, Any]) -> str:
     # settings
     eco_mode = "ON 🟢" if states.get("pm") == 1 else "OFF 🔴"
     charge_speed = states.get("cs", "Unknown")
-    now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    now_str = get_current_time_str()
     
     return (
         f"🔋 *Jackery Status* (ID: `{device_id}`)\n"
@@ -386,13 +418,20 @@ def telegram_polling_loop():
             
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-            params = {"offset": offset, "timeout": 15}
+            params = {
+                "offset": offset,
+                "timeout": 15,
+                "allowed_updates": json.dumps(["message", "callback_query", "edited_message"])
+            }
             res = poll_session.get(url, params=params, timeout=25)
             
             if res.status_code == 200:
                 data = res.json()
                 if data.get("ok"):
-                    for update in data.get("result", []):
+                    updates = data.get("result", [])
+                    if updates:
+                        _LOGGER.info("Received %d update(s) from Telegram", len(updates))
+                    for update in updates:
                         offset = update["update_id"] + 1
                         
                         if "callback_query" in update:
@@ -410,8 +449,8 @@ def telegram_polling_loop():
             # Normal long poll timeout when no updates occurred; continue immediately
             continue
         except requests.exceptions.RequestException as e:
-            _LOGGER.debug("Telegram polling transient network error: %s", e)
-            time.sleep(1)
+            _LOGGER.warning("Telegram polling network issue (retry in 2s): %s", e)
+            time.sleep(2)
         except Exception as e:
             _LOGGER.error("Unexpected error in telegram_polling_loop: %s", e)
             time.sleep(2)
