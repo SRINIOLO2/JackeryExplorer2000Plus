@@ -388,8 +388,16 @@ def format_status_message(device_id: str, states: Dict[str, Any]) -> str:
     charge_speed = states.get("cs", "Unknown")
     now_str = get_current_time_str()
     
+    update_time_ms = states.get("update_time_ms", 0)
+    stale_warning = ""
+    if update_time_ms > 0:
+        update_time = datetime.fromtimestamp(update_time_ms / 1000.0, timezone.utc)
+        age = datetime.now(timezone.utc) - update_time
+        if age.total_seconds() > 300: # 5 minutes
+            stale_warning = f"\n⚠️ *WARNING: DEVICE OFFLINE*\n_(Data is {int(age.total_seconds() // 60)} minutes old)_"
+
     return (
-        f"🔋 *Jackery Status* (ID: `{device_id}`)\n"
+        f"🔋 *Jackery Status* (ID: `{device_id}`){stale_warning}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"• *Battery level*: `{batt}%`\n"
         f"• *Temperature*: `{temp}°C`\n"
@@ -600,6 +608,10 @@ def poll_device(device_id: Any):
         it = properties.get("it", 0) / 10.0 if "it" in properties else 0
         ot = properties.get("ot", 0) / 10.0 if "ot" in properties else 0
         acov = properties.get("acov", 0) / 10.0 if "acov" in properties else 0
+        
+        device_meta = data.get("device", {})
+        update_time_ms = device_meta.get("updateTime", 0)
+        online_status = device_meta.get("onlineStatus", 0)
 
         # Calculations
         if acip > 0:
@@ -641,6 +653,8 @@ def poll_device(device_id: Any):
             "ast": ast,
             "sltb": sltb,
             "lm": lm,
+            "update_time_ms": update_time_ms,
+            "online_status": online_status,
         }
 
         # Update in-memory state
