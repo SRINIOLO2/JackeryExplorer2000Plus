@@ -188,17 +188,22 @@ def format_status_message(device_id: str, states: Dict[str, Any]) -> str:
     charge_speed = states.get("cs", "Unknown")
     now_str = get_current_time_str()
     
-    update_time_ms = states.get("update_time_ms", 0)
+    online_status = states.get("online_status", 1)
+    last_poll_epoch = states.get("last_poll_epoch", 0)
+    cloud_status_str = "ONLINE 🟢" if online_status == 1 else "OFFLINE 🔴"
+
     stale_warning = ""
-    if update_time_ms > 0:
-        update_time = datetime.fromtimestamp(update_time_ms / 1000.0, timezone.utc)
-        age = datetime.now(timezone.utc) - update_time
-        if age.total_seconds() > 300:
-            stale_warning = f"\n⚠️ *WARNING: DEVICE OFFLINE*\n_(Data is {int(age.total_seconds() // 60)} minutes old)_"
+    if online_status == 0:
+        stale_warning = "\n⚠️ *WARNING: DEVICE REPORTED OFFLINE BY CLOUD*"
+    elif last_poll_epoch > 0:
+        age_sec = time.time() - last_poll_epoch
+        if age_sec > 300:
+            stale_warning = f"\n⚠️ *WARNING: TELEMETRY STALE*\n_(Last sync was {int(age_sec // 60)} minutes ago)_"
 
     return (
         f"🔋 *Jackery Status* (ID: `{device_id}`){stale_warning}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
+        f"• *Status*: `{cloud_status_str}`\n"
         f"• *Battery level*: `{batt}%`\n"
         f"• *Temperature*: `{temp}°C`\n"
         f"• *Output Power*: `{op} W` (AC Output: {ac_out} | DC Output: {dc_out})\n"
@@ -509,6 +514,7 @@ async def poll_device(device_id: str):
             "ac_active": ac_active, "sfc": sfc, "cs": cs, "lps": lps,
             "pm": pm, "bp": bp, "ast": ast, "sltb": sltb, "lm": lm,
             "update_time_ms": update_time_ms, "online_status": online_status,
+            "last_poll_epoch": time.time(),
         }
 
         device_states[device_id] = state_payload
